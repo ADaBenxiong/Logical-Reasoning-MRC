@@ -10,7 +10,7 @@
 
 目录结构如下：
 
-  --reclor_data/
+  --reclor_data
   
       --train.json
       
@@ -18,7 +18,7 @@
       
       --test.json
       
-  --roberta-large/
+  --roberta-large
   
       --config.json
       
