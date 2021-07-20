@@ -7,10 +7,18 @@
 目录结构如下：
 
   --reclor_data/
+  
       --train.json
+      
       --val.json
+      
       --test.json
+      
   --roberta-large/
+  
       --config.json
+      
       --vocab.json
+      
       --pytorch_model.bin
+      
