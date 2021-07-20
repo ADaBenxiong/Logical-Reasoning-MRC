@@ -11,7 +11,9 @@
 目录结构如下：
 
   --reclor_data
+  
     --train.json
+    
     --val.json
       
     --test.json
