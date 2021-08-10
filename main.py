@@ -1,4 +1,7 @@
 
+import json
+import collections
+
 import argparse
 import logging
 
@@ -23,11 +26,14 @@ from transformers import (
     RobertaTokenizer,
     RobertaModel,
     RobertaForMultipleChoice,
+    AlbertConfig,
+    AlbertTokenizer,
+    AlbertModel,
     get_linear_schedule_with_warmup,
 )
 
 #from utils import ReClorProcessor
-from dagn import DAGN, DAGN_GCN
+from dagn import LogicalGCN
 from utils import convert_examples_to_features, ReClorProcessor
 # #用来进行可视化的
 # try:
@@ -36,7 +42,6 @@ from utils import convert_examples_to_features, ReClorProcessor
 #     from tensorboardX import SummaryWriter
 
 logger = logging.getLogger(__name__)
-
 # torch.backends.cudnn.enabled=False
 #=====================================================================初始化=============================================
 def set_seed(args):
@@ -45,6 +50,39 @@ def set_seed(args):
     torch.manual_seed(args.seed)
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
+
+# 对抗训练
+class FGM():
+    def __init__(self, model):
+        self.model = model
+        self.backup = {}
+
+    def attack(self, epsilon=1, emb_name = 'word_embeddings'):
+        #emb_name这个参数要换成对应模型中embedding的参数名
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and emb_name in name:
+
+                # print(param.requires_grad)
+                # print(emb_name)
+
+                self.backup[name] = param.data.clone()
+                # print(self.backup[name])
+                #
+                # print(name)
+                # print(param.requires_grad)
+                # print("param.grad:")
+                # print(param.grad)
+                norm = torch.norm(param.grad)
+                if norm != 0 and not torch.isnan(norm):
+                    r_at = epsilon * param.grad / norm
+                    param.data.add_(r_at)
+
+    def restore(self, emb_name = 'word_embeddings'):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and emb_name in name:
+                assert name in self.backup
+                param.data = self.backup[name]
+        self.backup = {}
 
 def simple_accuracy(preds, labels):
     return (preds == labels).mean()
@@ -69,7 +107,7 @@ def load_and_cache_examples(args, task, tokenizer, evaluate=False, test=False):
     #保存的文件的名字
     cached_features_file = os.path.join(
         args.data_dir,
-        "cached_{}_{}_{}_{}".format(
+        "cached_{}_{}_{}_{}_new".format(
             cached_mode,
             list(filter(None, args.model_name_or_path.split("/"))).pop(),
             str(args.max_seq_length),
@@ -77,8 +115,10 @@ def load_and_cache_examples(args, task, tokenizer, evaluate=False, test=False):
         ),
     )
 
-    if os.path.exists(cached_features_file) and not args.overwrite_cache:
+    util = True
+    if os.path.exists(cached_features_file) and not args.overwrite_cache and util:
         logger.info("Loading features from cached file %s", cached_features_file)
+        print("load cache")
         features = torch.load(cached_features_file)
     else:
         logger.info("Creating features from dataset file at %s", args.data_dir)
@@ -95,8 +135,6 @@ def load_and_cache_examples(args, task, tokenizer, evaluate=False, test=False):
             label_list,
             args.max_seq_length,
             tokenizer,
-            pad_on_left=False,  # pad on the left for xlnet
-            pad_token_segment_id=0,
         )
         if args.local_rank in [-1, 0]:
             logger.info("Saving features into cached file %s", cached_features_file)
@@ -109,9 +147,19 @@ def load_and_cache_examples(args, task, tokenizer, evaluate=False, test=False):
     all_input_ids = torch.tensor(select_field(features, "input_ids"), dtype=torch.long)
     all_input_mask = torch.tensor(select_field(features, "input_mask"), dtype=torch.long)
     all_segment_ids = torch.tensor(select_field(features, "segment_ids"), dtype=torch.long)
+    graph_nodes_a = torch.tensor(select_field(features, "graph_nodes_a"), dtype=torch.long)
+    graph_nodes_b = torch.tensor(select_field(features, "graph_nodes_b"), dtype=torch.long)
+
+    graph_edges_a = torch.tensor(select_field(features, "graph_edges_a"), dtype=torch.long)
+    graph_edges_b = torch.tensor(select_field(features, "graph_edges_b"), dtype=torch.long)
+    a_mask = torch.tensor(select_field(features, "a_mask"), dtype=torch.long)
+    b_mask = torch.tensor(select_field(features, "b_mask"), dtype=torch.long)
     all_label_ids = torch.tensor([f.label for f in features], dtype=torch.long)
 
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+    # dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, compose_unit, graph_a, graph_b, a_mask, b_mask, all_label_ids)
+    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, graph_nodes_a, graph_nodes_b, graph_edges_a, graph_edges_b, a_mask,
+                            b_mask, all_label_ids)
+
     return dataset
 
 #======================================================================模型配置===========================================
@@ -177,6 +225,7 @@ def ArgParse():
         help="The maximum total input sequence length after tokenization. \
               Sequences longer than this will be truncated, sequences shorter will be padded.",
     )
+    parser.add_argument("--do_fgm", action="store_true", help="Whether to run Adv-FGM training.")
     parser.add_argument("--do_train", action="store_true", help="Whether to run training.")
     parser.add_argument("--do_eval", action="store_true", help="Whether to run eval on the dev set.")
     parser.add_argument("--do_test", action="store_true", help="Whether to run test on the test set")
@@ -258,21 +307,16 @@ def ArgParse():
 #====================================================================训练、验证、测试======================================
 def train(args, train_dataset, model, tokenizer):
     """Train the model"""
-    # if args.local_rank in [-1, 0]:
-    #     str_list = str(args.output_dir).split('/')
-    #     tb_log_dir = os.path.join('summaries', str_list[-1])
-    #     tb_writer = SummaryWriter(tb_log_dir)
-    #     print(args.output_dir)
+
+    # Adversarial training
+    if args.do_fgm:
+        fgm = FGM(model)
 
     #一、加载用于训练的数据，统计训练的轮次
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, num_workers = 4)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, num_workers = 0)
 
-    # for n, train in enumerate(train_dataloader):
-    #     print(n)
-    #     print(train)
-    #     break
     if args.max_steps > 0:
         t_total = args.max_steps
         args.num_train_epochs = args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
@@ -354,9 +398,6 @@ def train(args, train_dataset, model, tokenizer):
             str(results["eval_loss"]),
             str(global_step)
         )
-        # tb_write.add_scalar("training/acc", train_acc, global_step)
-        # for key, value in results.items():
-        #     tb_writer.add_scalar("eval_{}".format(key), value, global_step)
         if results["eval_acc"] > best_dev_acc:
             best_dev_acc = results["eval_acc"]
             best_steps = global_step
@@ -376,7 +417,6 @@ def train(args, train_dataset, model, tokenizer):
             with open(txt_dir, 'w') as f:
                 rs = 'global_steps: {}; dev_acc: {}'.format(global_step, best_dev_acc)
                 f.write(rs)
-                # tb_writer.add_text('best_results', rs, global_step)
 
         return train_preds, train_label_ids, train_acc, best_steps, best_dev_acc
 
@@ -407,6 +447,7 @@ def train(args, train_dataset, model, tokenizer):
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
+
             # print(batch[0].shape)     #(2, 4, 128)    （batch_size, 4, 128）
             # print(batch[1].shape)     #(2, 4, 128)    （batch_size, 4, 128）
             # print(batch[2].shape)     #(2, 4, 128)    （batch_size, 4, 128）
@@ -417,9 +458,14 @@ def train(args, train_dataset, model, tokenizer):
                 "input_ids": batch[0],
                 "attention_mask": batch[1],
                 "token_type_ids": batch[2],
-                "labels": batch[3],
+                "graph_nodes_a": batch[3],
+                "graph_nodes_b": batch[4],
+                "graph_edges_a": batch[5],
+                "graph_edges_b": batch[6],
+                "a_mask": batch[7],
+                "b_mask": batch[8],
+                "labels": batch[9],
             }
-
             outputs = model(**inputs)
             loss = outputs[0]
             logits = outputs[1]
@@ -446,9 +492,21 @@ def train(args, train_dataset, model, tokenizer):
                 loss.backward()
                 #梯度裁剪
                 if not args.no_clip_grad_norm:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    if not args.do_fgm:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
+
+            if args.do_fgm:
+                fgm.attack()
+                outputs_adv = model(**inputs)
+                loss_adv =outputs_adv[0]
+                loss_adv = loss_adv.mean() / args.gradient_accumulation_steps
+                loss_adv.backward()
+                fgm.restore()
+
+
+
             #进行gradient_accumulation_step
             if(step + 1) % args.gradient_accumulation_steps == 0:
 
@@ -488,9 +546,7 @@ def train(args, train_dataset, model, tokenizer):
     if args.local_rank in [-1, 0]:
         train_preds, train_label_ids, train_acc, best_steps, best_dev_acc = evaluate_model(train_preds, train_label_ids, args, model, tokenizer, best_steps, best_dev_acc, global_step)
         save_model(args, model, tokenizer)
-        # tb_writer.close()
     return global_step, tr_loss / max(global_step, 1), best_steps
-
 
 def evaluate(args, model, tokenizer, prefix="", test = False):
     eval_task_names = (args.task_name, )
@@ -507,7 +563,7 @@ def evaluate(args, model, tokenizer, prefix="", test = False):
         args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
 
         eval_sampler = SequentialSampler(eval_dataset)
-        eval_dataloader = DataLoader(eval_dataset, sampler = eval_sampler, batch_size = args.eval_batch_size)
+        eval_dataloader = DataLoader(eval_dataset, sampler = eval_sampler, batch_size = args.eval_batch_size, num_workers = 0)
 
         if args.n_gpu > 1:
             model = torch.nn.DataParallel(model)
@@ -520,7 +576,9 @@ def evaluate(args, model, tokenizer, prefix="", test = False):
         nb_eval_steps = 0
         preds = None
         out_label_ids = None
+
         for batch in tqdm(eval_dataloader, desc = "Evaluating"):
+
             model.eval()
             batch = tuple(t.to(args.device) for t in batch)
 
@@ -528,11 +586,18 @@ def evaluate(args, model, tokenizer, prefix="", test = False):
                 inputs = {
                     "input_ids": batch[0],
                     "attention_mask": batch[1],
-                    "token_type_ids":batch[2],
-                    "labels":batch[3]
+                    "token_type_ids": batch[2],
+                    "graph_nodes_a": batch[3],
+                    "graph_nodes_b": batch[4],
+                    "graph_edges_a": batch[5],
+                    "graph_edges_b": batch[6],
+                    "a_mask": batch[7],
+                    "b_mask": batch[8],
+                    "labels": batch[9],
                 }
                 outputs = model(**inputs)
                 tmp_eval_loss, logits = outputs[:2]
+
 
                 eval_loss += tmp_eval_loss.mean().item()
             nb_eval_steps += 1
@@ -627,85 +692,31 @@ def main():
         torch.distributed.barrier()     # Make sure only the first process in distributed training will download model & vocab
 
     config = RobertaConfig.from_pretrained(
+    # config = RobertaConfig.from_pretrained(
         args.config_name if args.config_name else args.model_name_or_path,
         num_labels=num_labels,
         finetuning_task=args.task_name,
         cache_dir=args.cache_dir if args.cache_dir else None,
     )
     tokenizer = RobertaTokenizer.from_pretrained(
+    # tokenizer = RobertaTokenizer.from_pretrained(
         args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
         do_lower_case=args.do_lower_case,
         cache_dir=args.cache_dir if args.cache_dir else None,
     )
     # vocab = tokenizer.vocab     #字典类型表示{token:id}
     # ids_to_tokens = tokenizer.ids_to_tokens #列表类型表示[id]
-    model = DAGN.from_pretrained(
+    model = LogicalGCN.from_pretrained(
         args.model_name_or_path,
         from_tf=bool(".ckpt" in args.model_name_or_path),
         config=config,
-        vocab_file=args.tokenizer_name,
+        # vocab_file=args.tokenizer_name,
         use_gcn=args.use_gcn,
         use_pool=args.use_pool,
         cache_dir=args.cache_dir if args.cache_dir else None,
     )
     print(config)
     print(tokenizer)
-    # print(model)
-    # print(model.named_parameters())
-    # for x, y in model.named_parameters():
-    #     print(x, y.shape)
-    #     if 'classifier' in x:
-    #         print(x, y)
-    #     if 'pooler' in x:
-    #         print(x, y)
-        #训练一个epoch证明了模型未使用初始化 比 使用初始化的效果好
-        #模型参数初始化
-        #attention.self.query.weight (1024, 1024)   #query, key, value
-        #attention.self.query.bias (1024)
-        #attention.output.dense.weight  (1024, 1024)
-        #attention.output.dense.bias (1024)
-        #attention.output.LayerNorm.weigth (1024)
-        #attention.output.LayerNorm.bias (1024)
-        # ...
-        #pooler.dense.weight (1024, 1024)
-        #pooler.dense.bias (1024)
-        # tensor([[-0.0391, 0.0444, -0.0249, ..., 0.0010, 0.0244, 0.0079],
-        #         [-0.0225, 0.0373, -0.0350, ..., -0.0122, 0.0424, 0.0095],
-        #         [-0.0328, -0.0122, -0.0519, ..., -0.0761, 0.0065, -0.0129],
-        #         ...,
-        #         [-0.0033, 0.0137, 0.0128, ..., 0.0554, -0.0628, -0.0112],
-        #         [-0.0333, 0.0165, -0.0234, ..., -0.0384, -0.0343, -0.0629],
-        #         [0.0137, 0.0049, -0.0149, ..., 0.0111, 0.0091, 0.0217]],
-        #        requires_grad=True)
-        # tensor([-0.0365, -0.0285, 0.0037, ..., 0.0227, 0.0211, -0.0185],
-        #        requires_grad=True)
-        #classifier.weight (1, 1024)
-        #classifier.bias (1)
-
-        # 未使用参数初始化
-        # tensor([[-0.0110, -0.0260, -0.0111, ..., -0.0266, 0.0110, -0.0238]],
-        #        requires_grad=True)
-        # tensor([0.0120], requires_grad=True)
-
-        # 使用了参数初始化
-        # tensor([[ 0.0091,  0.0265,  0.0128,  ..., -0.0071, -0.0009, -0.0012]],
-        #        requires_grad=True)
-        # tensor([0.], requires_grad=True)
-    '''
-    # test
-    text = 'I am a lovely boy who likes playing football'
-    tokenizer_out = tokenizer.tokenize(text)
-    print(tokenizer_out)
-    tokenizer_encode = tokenizer.encode(text)
-    print(tokenizer_encode)
-
-    vocab = tokenizer.vocab     #字典类型表示{token:id}
-    ids_to_tokens = tokenizer.ids_to_tokens #列表类型表示[id]
-
-    for i in tokenizer_encode:
-        print(ids_to_tokens[i])
-    '''
-
 
     if args.local_rank == 0:
         torch.distributed.barrier()     # Make sure only the first process in distributed training will download model & vocab
@@ -721,6 +732,7 @@ def main():
     if args.do_train:
         #形成了DataTensor数据
         train_dataset = load_and_cache_examples(args, args.task_name, tokenizer, evaluate = False)
+
         global_step, tr_loss, best_steps = train(args, train_dataset, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
@@ -737,8 +749,18 @@ def main():
             global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
             prefix = checkpoint.split("/")[-1] if checkpoint.find("checkpoint") != -1 else ""
 
-            model = DAGN.from_pretrained(checkpoint)
+            print("-" * 200)
+            # model = AlbertForMultipleChoice(
+            model = LogicalGCN.from_pretrained(
+                checkpoint,
+                from_tf=bool(".ckpt" in checkpoint),
+                config=config,
+                use_gcn=args.use_gcn,
+                use_pool=args.use_pool,
+                cache_dir=args.cache_dir if args.cache_dir else None,
+            )
             model.to(args.device)
+            print("*" * 200)
             result = evaluate(args, model, tokenizer, prefix = prefix)
             result = dict((k + "_{}".format(global_step), v) for k, v in result.items())
             results.update(result)
@@ -752,8 +774,15 @@ def main():
             checkpoint_dir = os.path.join(args.output_dir)
         if best_steps:
             logger.info("best steps of eval acc is the following checkpoints: %s", best_steps)
-
-        model = DAGN.from_pretrained(checkpoint_dir)
+        # model = AlbertForMultipleChoice.from_pretrained(
+        model = LogicalGCN.from_pretrained(
+            checkpoint_dir,
+            from_tf=bool(".ckpt" in checkpoint),
+            config=config,
+            use_gcn=args.use_gcn,
+            use_pool=args.use_pool,
+            cache_dir=args.cache_dir if args.cache_dir else None,
+        )
         model.to(args.device)
 
         result, preds = evaluate(args, model, tokenizer, test = True)
@@ -761,7 +790,6 @@ def main():
         result = dict((k, v) for k, v in result.items())
         results.update(result)
         np.save(os.path.join(args.output_dir, "test_preds.npy" if args.output_dir is not None else "test_preds.npy"),preds)
-
 
 if __name__ == "__main__":
     main()
