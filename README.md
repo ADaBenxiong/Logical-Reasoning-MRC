@@ -26,7 +26,7 @@
       
     --pytorch_model.bin
       
- 
+transformers = 4.1.1
 模型      Roberta-pool  
 
 100       0.364
