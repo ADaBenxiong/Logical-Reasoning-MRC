@@ -1,7 +1,9 @@
 # Logic-Driven Machine Reading Comprehension with Graph Convolutional Networks
 
 整理逻辑推理机器阅读理解代码库。
+
 使用RoBerta预训练模型，使用inductive learning图神经网络
+
 在ReClor数据集上、LogiQA数据集上进行实验。
 
 代码参考https://github.com/yuweihao/reclor， https://github.com/Eleanor-H/DAGN
