@@ -29,10 +29,6 @@ Our code reference:
 	2. train model
 	bash run_roberta_large.sh
 
-- --use_gcn represents the method of using GCN
-- --use_pool represents the method of using Pooling
-- --fo_fgm represents the method of using adversarial training
-
 
 ## Results
 
