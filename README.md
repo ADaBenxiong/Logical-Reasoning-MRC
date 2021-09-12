@@ -4,7 +4,7 @@ Our logical reasoning machine reading comprehension code repository.
 
 We utilize RoBerta as our backbone model, and we use inductive learning graph neural network. We propose a new model **EIGN**, an entity inference graph network.
 
-We verify our result on ReClor dataset and LogiQA dataset.
+We verify our results on ReClor dataset and LogiQA dataset.
 
 
 Our code reference:
