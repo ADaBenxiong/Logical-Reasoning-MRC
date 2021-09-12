@@ -1,8 +1,8 @@
-# Logical_MRC_ReClor
+# Logic-Driven Machine Reading Comprehension with Graph Convolutional Networks
 
-个人学习仓库，整理逻辑推理机器阅读理解的代码库。
-
-使用RoBerta预训练模型， 使用ReClor数据集， 使用inductive learning 图神经网络
+整理逻辑推理机器阅读理解代码库。
+使用RoBerta预训练模型，使用inductive learning图神经网络
+在ReClor数据集上、LogiQA数据集上进行实验。
 
 代码参考https://github.com/yuweihao/reclor， https://github.com/Eleanor-H/DAGN
 
@@ -25,7 +25,4 @@
     --vocab.json
       
     --pytorch_model.bin
-      
-transformers = 4.1.1
-模型      Roberta-pool  
     
