@@ -8,6 +8,7 @@ We verify our result on ReClor dataset and LogiQA dataset.
 
 
 Our code reference:
+
 [https://github.com/yuweihao/reclor](https://github.com/yuweihao/reclor%EF%BC%8C)  
 [https://github.com/Eleanor-H/DAGN](https://github.com/Eleanor-H/DAGN)
 ##   directory structure
