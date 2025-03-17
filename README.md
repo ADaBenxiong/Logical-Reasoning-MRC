@@ -1,8 +1,8 @@
-# Logic-Driven Machine Reading Comprehension with Graph Convolutional Networks
+# Verb-driven machine reading comprehension with dual-graph neural network
 
 Our logical reasoning machine reading comprehension code repository.
 
-We utilize RoBerta as our backbone model, and we use inductive learning graph neural network. We propose a new model **EIGN**, an entity inference graph network.
+We present a verb-driven dual-graph network(**VDGN**) that utilizes core verbs of sentences to model the inter-sentence relationship by the ability of verbs to express linguistic context and the shortest dependency path to model the relationship between entities of intra-sentence.
 
 We verify our results on ReClor dataset and LogiQA dataset.
 
